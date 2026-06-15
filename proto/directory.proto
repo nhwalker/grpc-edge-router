@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package edgerouter.v1;
+
+option java_package = "io.github.nhwalker.edgerouter.proto";
+option java_multiple_files = true;
+option java_outer_classname = "DirectoryProto";
+
+// ClientDirectory is the gateway's own control-plane API. It lets callers
+// discover which edge clients are currently connected (and therefore routable
+// via the x-client-id metadata contract). It carries no edge-service payloads;
+// those flow through the generic passthrough proxy instead.
+service ClientDirectory {
+  // ListClients returns a point-in-time snapshot of connected edges.
+  rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
+
+  // WatchClients streams the current set of edges followed by live
+  // add/remove events as edges connect and disconnect.
+  rpc WatchClients(WatchRequest) returns (stream ClientEvent);
+}
+
+message Client {
+  // The clientId an edge authenticated as (its SSH public-key identity).
+  string id = 1;
+  // Epoch milliseconds at which the edge's tunnel was established.
+  int64 connected_at = 2;
+  // Whether the edge currently has a live tunnel.
+  bool online = 3;
+}
+
+message ListClientsRequest {}
+
+message ListClientsResponse {
+  repeated Client clients = 1;
+}
+
+message WatchRequest {}
+
+message ClientEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    ADDED = 1;
+    REMOVED = 2;
+  }
+  Type type = 1;
+  Client client = 2;
+}

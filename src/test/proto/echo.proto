@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package edgerouter.test;
+
+option java_package = "io.github.nhwalker.edgerouter.test";
+option java_multiple_files = true;
+
+// A trivial service used only by the end-to-end test as a stand-in "edge"
+// service. The gateway never sees this proto — that is the whole point.
+service EchoService {
+  rpc Echo(EchoRequest) returns (EchoReply);
+  rpc EchoStream(EchoRequest) returns (stream EchoReply);
+}
+
+message EchoRequest {
+  string message = 1;
+  int32 count = 2;
+}
+
+message EchoReply {
+  string message = 1;
+}

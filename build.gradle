@@ -1,0 +1,90 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'com.google.protobuf' version '0.9.5'
+}
+
+group = 'io.github.nhwalker'
+version = '0.1.0'
+
+ext {
+    grpcVersion = '1.71.0'
+    protobufVersion = '4.29.3'
+    minaSshdVersion = '2.15.0'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // gRPC
+    implementation "io.grpc:grpc-netty-shaded:${grpcVersion}"
+    implementation "io.grpc:grpc-protobuf:${grpcVersion}"
+    implementation "io.grpc:grpc-stub:${grpcVersion}"
+    implementation "io.grpc:grpc-services:${grpcVersion}"
+    compileOnly "org.apache.tomcat:annotations-api:6.0.53" // for javax.annotation.Generated
+    testCompileOnly "org.apache.tomcat:annotations-api:6.0.53"
+
+    // Protobuf runtime
+    implementation "com.google.protobuf:protobuf-java:${protobufVersion}"
+
+    // Apache MINA SSHD (embedded SSH server)
+    implementation "org.apache.sshd:sshd-core:${minaSshdVersion}"
+
+    // Logging
+    implementation 'org.slf4j:slf4j-api:2.0.16'
+    runtimeOnly 'ch.qos.logback:logback-classic:1.5.16'
+
+    // Test
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation "io.grpc:grpc-testing:${grpcVersion}"
+    testImplementation 'org.assertj:assertj-core:3.27.3'
+}
+
+sourceSets {
+    main {
+        proto {
+            srcDir 'proto'
+        }
+    }
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:${protobufVersion}"
+    }
+    plugins {
+        grpc {
+            artifact = "io.grpc:protoc-gen-grpc-java:${grpcVersion}"
+        }
+    }
+    generateProtoTasks {
+        all().each { task ->
+            task.plugins {
+                grpc {}
+            }
+        }
+    }
+}
+
+application {
+    mainClass = 'io.github.nhwalker.edgerouter.Main'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = 'full'
+        showStandardStreams = Boolean.getBoolean('showStd')
+    }
+}

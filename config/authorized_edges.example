@@ -1,0 +1,15 @@
+# Authorized edge keys: one per line, an OpenSSH authorized_keys line prefixed
+# with the clientId the key authenticates as. Lines starting with '#' and blank
+# lines are ignored. Keys are matched by SHA-256 fingerprint.
+#
+# Format:
+#   <clientId> <openssh-public-key>
+#
+# Generate an edge keypair:
+#   ssh-keygen -t ed25519 -f edge-clientA -C clientA
+# then paste the contents of edge-clientA.pub after the clientId:
+#
+# clientA ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleExa clientA
+# clientB ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDExample... clientB
+#
+# Copy this file to config/authorized_edges (gitignored) and add your real keys.
