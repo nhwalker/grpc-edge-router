@@ -83,9 +83,9 @@ connected for that id it returns `UNAVAILABLE`.
 Requires JDK 21.
 
 ```sh
-# Provision authorized edge keys (see config/authorized_edges.example):
-cp config/authorized_edges.example config/authorized_edges
-# ...add your edges' public keys, each prefixed with its clientId...
+# Provision the trusted CA(s) (see config/trusted_user_ca.example):
+cp config/trusted_user_ca.example config/trusted_user_ca
+# ...add your certificate authority's public key(s)...
 
 ./gradlew run
 ```
@@ -98,24 +98,49 @@ Configuration via environment variables (all optional):
 | `SSH_HOST` | `0.0.0.0` | SSH ingress bind host |
 | `SSH_PORT` | `2222` | SSH ingress port |
 | `HOST_KEY_PATH` | `data/ssh_host_key.ser` | SSH host key (generated on first run) |
-| `AUTHORIZED_EDGES_PATH` | `config/authorized_edges` | edge public-key → clientId file |
+| `TRUSTED_USER_CA_PATH` | `config/trusted_user_ca` | trusted edge-certificate CA public keys |
+
+## Edge identity: SSH certificates
+
+Edges authenticate with an **OpenSSH user certificate** signed by a CA the gateway
+trusts. The gateway trusts the **CA**, not individual edge keys — so onboarding a
+new edge means the CA signs a cert, with nothing to change on the gateway. An
+edge's `clientId` is its **SSH username**, which must be one of the certificate's
+**principals** (the CA decides which clientIds an edge may assume).
+
+```sh
+# One-time: create the CA keypair (keep ca_key secret; publish ca_key.pub to the gateway).
+ssh-keygen -t ed25519 -f ca_key
+
+# Per edge: create its keypair, then have the CA sign a short-lived user cert.
+ssh-keygen -t ed25519 -f edge_clientA
+ssh-keygen -s ca_key -I clientA -n clientA -V +1h edge_clientA.pub
+#            \_ sign  \_ keyId   \_ principal (= clientId)  \_ validity
+```
+
+Because the gateway verifies the certificate's **CA signature, CA trust, validity
+window, type, and principal** itself (MINA does not verify CA trust on the user-auth
+path), an edge cannot self-mint a certificate for another clientId. Rotation and
+revocation come from short certificate lifetimes (a CRL/KRL can be added later).
 
 ## Edge-side setup
 
-The edge runs its normal gRPC server on loopback and dials out. `autossh` keeps
-the tunnel alive across NAT timeouts and reconnects:
+The edge runs its normal gRPC server on loopback and dials out with its
+certificate. `autossh` keeps the tunnel alive across NAT timeouts and reconnects:
 
 ```sh
 # Edge: gRPC server on 127.0.0.1:50051; reverse-forward it to the gateway.
 autossh -M 0 -N \
   -R 0:localhost:50051 \                        # 0 = gateway assigns a dynamic port
+  -i edge_clientA \                             # private key; edge_clientA-cert.pub sits beside it
   -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
   -o ExitOnForwardFailure=yes \
-  clientA@gateway.example.com -p 2222
+  clientA@gateway.example.com -p 2222           # username clientA must be a cert principal
 ```
 
-- One SSH keypair **per edge**; the gateway maps the public key → `clientId` via
-  `config/authorized_edges`. That mapping is the identity and revocation point.
+- The SSH **username must be a certificate principal**; that principal becomes the
+  `clientId`. A cert may carry several principals (the edge picks one via the
+  username).
 - On reconnect the edge gets a **new** dynamic port; the registry updates and the
   old entry is evicted.
 - The gateway only permits **reverse (`-R`) forwarding bound to loopback** — no
@@ -131,9 +156,9 @@ autossh -M 0 -N \
 ```
 
 The end-to-end test (`EndToEndTunnelTest`) stands up a real loopback "edge" gRPC
-server, reverse-tunnels it into the gateway over SSH, and drives unary and
-server-streaming calls through the generic passthrough — proving the gateway
-needs no knowledge of the edge's proto.
+server, reverse-tunnels it into the gateway over SSH (authenticating with a CA-signed
+user certificate), and drives unary and server-streaming calls through the generic
+passthrough — proving the gateway needs no knowledge of the edge's proto.
 
 ## Project layout
 
@@ -142,11 +167,12 @@ proto/directory.proto                         # ClientDirectory API (gateway's o
 src/main/java/io/github/nhwalker/edgerouter/
   Main.java                                   # wires SSH + gRPC proxy + directory over one registry
   EdgeRegistry.java                           # clientId -> { session, loopback port, ManagedChannel }
-  SshIngress.java                             # MINA SSHD: pubkey->clientId, loopback reverse-forward capture
+  SshIngress.java                             # MINA SSHD: cert auth -> clientId, loopback reverse-forward capture
+  CertificateAuthorities.java                 # trusted CAs; verifies user certs -> clientId (principal)
+  CertificateSignatureSupport.java            # cert-unwrapping SSH signature factories (MINA cert-auth fix)
   GrpcPassthrough.java                        # generic byte proxy (fallback registry + ServerCall/ClientCall bridge)
   DirectoryService.java                       # ClientDirectory gRPC impl
-  AuthorizedEdges.java                        # pubkey fingerprint -> clientId
-src/test/java/...                             # registry/auth unit tests + end-to-end tunnel test
+src/test/java/...                             # registry/cert-auth unit tests + end-to-end tunnel test
 ```
 
 ## Design notes & scope
@@ -165,12 +191,15 @@ src/test/java/...                             # registry/auth unit tests + end-t
 
 - **TLS / mTLS** on the exposed gRPC port. Today the caller↔gateway hop is
   plaintext; the edge↔gateway hop is already SSH-encrypted.
-- **Caller authorization.** SSH keys authenticate *edges into* the gateway; there
-  is not yet a control on *who may call out through* it or which `clientId` a
+- **Caller authorization.** Certificates authenticate *edges into* the gateway;
+  there is not yet a control on *who may call out through* it or which `clientId` a
   caller may target. A caller can currently set any `x-client-id`. This must be
   added (e.g. mTLS client identity → allowed clientIds) before exposing the
   gateway to untrusted callers.
-- **Host key & edge key management:** provisioning, rotation, revocation.
+- **Certificate revocation (KRL).** Trust is bounded by short cert lifetimes today;
+  a key/serial revocation list would allow faster revocation.
+- **Host key management:** the SSH host key is generated on first run; provisioning
+  and rotation for production are out of scope here.
 
 These are tracked as the next steps, consistent with the original design's
 deferred items.

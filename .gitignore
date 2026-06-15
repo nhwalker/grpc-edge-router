@@ -29,7 +29,7 @@ build/
 
 # Generated/runtime state
 data/
-/config/authorized_edges
+/config/trusted_user_ca
 
 # IDE
 .idea/

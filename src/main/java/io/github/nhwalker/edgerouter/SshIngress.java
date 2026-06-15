@@ -3,12 +3,16 @@ package io.github.nhwalker.edgerouter;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.sshd.common.AttributeRepository.AttributeKey;
+import org.apache.sshd.common.NamedFactory;
 import org.apache.sshd.common.forward.DefaultForwarder;
 import org.apache.sshd.common.forward.PortForwardingEventListener;
 import org.apache.sshd.common.session.ConnectionService;
 import org.apache.sshd.common.session.Session;
 import org.apache.sshd.common.session.SessionListener;
+import org.apache.sshd.common.signature.Signature;
 import org.apache.sshd.common.util.net.SshdSocketAddress;
 import org.apache.sshd.core.CoreModuleProperties;
 import org.apache.sshd.server.SshServer;
@@ -22,8 +26,8 @@ import org.slf4j.LoggerFactory;
  * Embedded SSH server that terminates edges' reverse tunnels.
  *
  * <ul>
- *   <li>Authenticates edges by public key, mapping each key to a {@code clientId} via
- *       {@link AuthorizedEdges}; unknown keys are rejected.
+ *   <li>Authenticates edges by an OpenSSH user certificate, mapping each to a {@code clientId} via
+ *       {@link CertificateAuthorities}; anything not signed by a trusted CA is rejected.
  *   <li>Allows only remote (reverse, {@code -R}) forwarding bound to loopback; rejects local
  *       forwarding, agent, and X11.
  *   <li>Captures the dynamically-assigned bound port from
@@ -43,19 +47,26 @@ public final class SshIngress {
   private final EdgeRegistry registry;
 
   public SshIngress(
-      String host, int port, Path hostKeyPath, AuthorizedEdges authorizedEdges, EdgeRegistry registry) {
+      String host,
+      int port,
+      Path hostKeyPath,
+      CertificateAuthorities certificateAuthorities,
+      EdgeRegistry registry) {
     this.registry = registry;
     this.sshd = SshServer.setUpDefaultServer();
     sshd.setHost(host);
     sshd.setPort(port);
     sshd.setKeyPairProvider(new SimpleGeneratorHostKeyProvider(hostKeyPath));
 
-    // Public-key auth -> clientId. Reject anything not in the authorized set.
+    // Advertise the OpenSSH certificate signature algorithms so the server accepts and parses user
+    // certificates (the default factory set does not include the *-cert-v01@openssh.com variants).
+    enableCertificateAlgorithms();
+
+    // Certificate auth -> clientId. Reject anything not signed by a trusted CA.
     sshd.setPublickeyAuthenticator(
         (username, key, session) -> {
-          String clientId = authorizedEdges.clientIdFor(key);
+          String clientId = certificateAuthorities.authenticate(username, key);
           if (clientId == null) {
-            log.warn("rejected SSH auth: unknown public key (username={})", username);
             return false;
           }
           session.setAttribute(CLIENT_ID, clientId);
@@ -73,6 +84,19 @@ public final class SshIngress {
 
     sshd.addPortForwardingEventListener(new ForwardCapture());
     sshd.addSessionListener(new CleanupOnClose());
+  }
+
+  /**
+   * Enable OpenSSH user-certificate public-key auth: advertise the {@code *-cert-v01@openssh.com}
+   * algorithms using cert-unwrapping signature factories (the stock MINA factories do not unwrap the
+   * certificate before verifying the possession signature). The certificate factories are placed
+   * first so they win name resolution; the existing non-certificate factories follow.
+   */
+  private void enableCertificateAlgorithms() {
+    List<NamedFactory<Signature>> factories =
+        new ArrayList<>(CertificateSignatureSupport.certificateFactories());
+    factories.addAll(sshd.getSignatureFactories());
+    sshd.setSignatureFactories(factories);
   }
 
   public void start() throws IOException {

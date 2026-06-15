@@ -27,12 +27,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import org.apache.sshd.certificate.OpenSshCertificateBuilder;
 import org.apache.sshd.client.SshClient;
 import org.apache.sshd.client.session.ClientSession;
+import org.apache.sshd.common.NamedFactory;
+import org.apache.sshd.common.config.keys.OpenSshCertificate;
+import org.apache.sshd.common.helpers.AbstractFactoryManager;
+import org.apache.sshd.common.signature.BuiltinSignatures;
+import org.apache.sshd.common.signature.Signature;
 import org.apache.sshd.common.util.net.SshdSocketAddress;
 import org.apache.sshd.server.forward.AcceptAllForwardingFilter;
 import org.junit.jupiter.api.AfterAll;
@@ -58,6 +65,7 @@ class EndToEndTunnelTest {
   private ClientSession sshSession;
   private ManagedChannel callerChannel;
   private Path hostKeyPath;
+  private KeyPair caKey;
 
   @BeforeAll
   void setUp() throws Exception {
@@ -65,16 +73,19 @@ class EndToEndTunnelTest {
     edgeServer = ServerBuilder.forPort(0).addService(new EchoImpl()).build().start();
     int edgePort = edgeServer.getPort();
 
-    // 2. The edge's SSH identity, authorized as CLIENT_ID.
+    // 2. The edge's identity: a user certificate (principal = CLIENT_ID) signed by a trusted CA.
+    caKey = KeyPairGenerator.getInstance("RSA").genKeyPair();
     KeyPair edgeKey = KeyPairGenerator.getInstance("RSA").genKeyPair();
-    AuthorizedEdges authorized = new AuthorizedEdges();
-    authorized.add(CLIENT_ID, edgeKey.getPublic());
+    OpenSshCertificate edgeCert = mintUserCert(edgeKey, caKey, CLIENT_ID);
+
+    CertificateAuthorities cas = new CertificateAuthorities();
+    cas.addTrustedCa(caKey.getPublic());
 
     // 3. The gateway: SSH ingress + gRPC proxy/directory over one registry.
     registry = new EdgeRegistry();
     hostKeyPath = Files.createTempFile("edge-router-hostkey", ".ser");
     Files.deleteIfExists(hostKeyPath); // let MINA generate it
-    ssh = new SshIngress("127.0.0.1", 0, hostKeyPath, authorized, registry);
+    ssh = new SshIngress("127.0.0.1", 0, hostKeyPath, cas, registry);
     ssh.start();
 
     GrpcPassthrough passthrough = new GrpcPassthrough(registry);
@@ -85,13 +96,14 @@ class EndToEndTunnelTest {
             .build()
             .start();
 
-    // 4. The edge dials out: reverse-forward localhost:edgePort to a dynamic gateway port.
+    // 4. The edge dials out: authenticate with the cert, then reverse-forward localhost:edgePort.
     sshClient = SshClient.setUpDefaultClient();
     sshClient.setForwardingFilter(AcceptAllForwardingFilter.INSTANCE);
+    enableCertSignatures(sshClient);
     sshClient.start();
     sshSession =
         sshClient.connect(CLIENT_ID, "127.0.0.1", ssh.getPort()).verify(5000).getSession();
-    sshSession.addPublicKeyIdentity(edgeKey);
+    sshSession.addPublicKeyIdentity(new KeyPair(edgeCert, edgeKey.getPrivate()));
     sshSession.auth().verify(5000);
     sshSession.startRemotePortForwarding(
         new SshdSocketAddress("", 0), new SshdSocketAddress("localhost", edgePort));
@@ -192,6 +204,54 @@ class EndToEndTunnelTest {
     } finally {
       noHeader.shutdownNow();
     }
+  }
+
+  @Test
+  void untrustedCaCertIsRejectedAtAuth() throws Exception {
+    // A cert for the right principal but signed by a CA the gateway does not trust must not auth.
+    KeyPair untrustedCa = KeyPairGenerator.getInstance("RSA").genKeyPair();
+    KeyPair edgeKey = KeyPairGenerator.getInstance("RSA").genKeyPair();
+    OpenSshCertificate cert = mintUserCert(edgeKey, untrustedCa, CLIENT_ID);
+
+    SshClient client = SshClient.setUpDefaultClient();
+    enableCertSignatures(client);
+    client.start();
+    try (ClientSession session =
+        client.connect(CLIENT_ID, "127.0.0.1", ssh.getPort()).verify(5000).getSession()) {
+      session.addPublicKeyIdentity(new KeyPair(cert, edgeKey.getPrivate()));
+      assertThatThrownBy(() -> session.auth().verify(5000)).isInstanceOf(Exception.class);
+    } finally {
+      client.stop();
+    }
+  }
+
+  private static OpenSshCertificate mintUserCert(KeyPair subject, KeyPair ca, String... principals)
+      throws Exception {
+    return OpenSshCertificateBuilder.userCertificate()
+        .publicKey(subject.getPublic())
+        .id("edge-" + String.join(",", principals))
+        .principals(List.of(principals))
+        .validAfter(Instant.now().minusSeconds(60))
+        .validBefore(Instant.now().plusSeconds(3600))
+        .sign(ca);
+  }
+
+  /** Advertise the OpenSSH certificate signature algorithms on a client/server factory manager. */
+  private static void enableCertSignatures(AbstractFactoryManager mgr) {
+    List<NamedFactory<Signature>> factories = new ArrayList<>(mgr.getSignatureFactories());
+    for (BuiltinSignatures cert :
+        List.of(
+            BuiltinSignatures.ed25519_cert,
+            BuiltinSignatures.rsaSHA512_cert,
+            BuiltinSignatures.rsaSHA256_cert,
+            BuiltinSignatures.nistp256_cert,
+            BuiltinSignatures.nistp384_cert,
+            BuiltinSignatures.nistp521_cert)) {
+      if (cert.isSupported() && !factories.contains(cert)) {
+        factories.add(cert);
+      }
+    }
+    mgr.setSignatureFactories(factories);
   }
 
   private void awaitEdgeRegistered() throws InterruptedException {

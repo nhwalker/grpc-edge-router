@@ -1,0 +1,17 @@
+# Trusted edge certificate-authority (CA) public keys: one OpenSSH public-key
+# line per CA. Blank lines and lines starting with '#' are ignored.
+#
+# Edges authenticate with a USER certificate signed by one of these CAs; the
+# gateway trusts the CA, not individual edge keys. An edge's clientId is its SSH
+# username, which must be one of the certificate's principals.
+#
+# Create a CA and sign an edge certificate:
+#   ssh-keygen -t ed25519 -f ca_key                 # the CA keypair (keep ca_key secret)
+#   ssh-keygen -t ed25519 -f edge_clientA           # the edge's own keypair
+#   ssh-keygen -s ca_key -I clientA -n clientA \     # -I keyId (audit), -n principal (= clientId)
+#              -V +1h edge_clientA.pub               # -V validity window
+# then put the CA *public* key below:
+#
+# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...CA-public-key... ca@example.com
+#
+# Copy this file to config/trusted_user_ca (gitignored) and add your CA key(s).

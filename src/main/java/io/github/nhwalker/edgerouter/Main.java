@@ -20,7 +20,7 @@ import org.slf4j.LoggerFactory;
  *   SSH_HOST              SSH bind host (default 0.0.0.0)
  *   SSH_PORT              SSH ingress port (default 2222)
  *   HOST_KEY_PATH        SSH host key file (default data/ssh_host_key.ser)
- *   AUTHORIZED_EDGES_PATH  edge public-key -> clientId file (default config/authorized_edges)
+ *   TRUSTED_USER_CA_PATH   trusted edge CA public keys (default config/trusted_user_ca)
  * </pre>
  */
 public final class Main {
@@ -32,23 +32,23 @@ public final class Main {
     String sshHost = env("SSH_HOST", "0.0.0.0");
     int sshPort = envInt("SSH_PORT", 2222);
     Path hostKeyPath = Path.of(env("HOST_KEY_PATH", "data/ssh_host_key.ser"));
-    Path authorizedEdgesPath = Path.of(env("AUTHORIZED_EDGES_PATH", "config/authorized_edges"));
+    Path trustedUserCaPath = Path.of(env("TRUSTED_USER_CA_PATH", "config/trusted_user_ca"));
 
     Files.createDirectories(hostKeyPath.toAbsolutePath().getParent());
 
-    AuthorizedEdges authorizedEdges;
-    if (Files.exists(authorizedEdgesPath)) {
-      authorizedEdges = AuthorizedEdges.fromFile(authorizedEdgesPath);
+    CertificateAuthorities certificateAuthorities;
+    if (Files.exists(trustedUserCaPath)) {
+      certificateAuthorities = CertificateAuthorities.fromFile(trustedUserCaPath);
     } else {
-      authorizedEdges = new AuthorizedEdges();
+      certificateAuthorities = new CertificateAuthorities();
       log.warn(
-          "no authorized edges file at {} — all SSH auth will be rejected until edges are provisioned",
-          authorizedEdgesPath);
+          "no trusted CA file at {} — all SSH auth will be rejected until a CA is provisioned",
+          trustedUserCaPath);
     }
 
     EdgeRegistry registry = new EdgeRegistry();
 
-    SshIngress ssh = new SshIngress(sshHost, sshPort, hostKeyPath, authorizedEdges, registry);
+    SshIngress ssh = new SshIngress(sshHost, sshPort, hostKeyPath, certificateAuthorities, registry);
 
     GrpcPassthrough passthrough = new GrpcPassthrough(registry);
     Server grpc =
